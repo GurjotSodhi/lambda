@@ -1,0 +1,104 @@
+name: Update Function CI CD
+
+on:
+  pull_request:
+    branches:
+      - development
+      - feature/*
+  push:
+    branches:
+      - development
+      - main
+      - feature/*
+
+permissions:
+  packages: write
+  id-token: write
+  contents: read
+jobs:
+  get-filenames:
+    runs-on: ubuntu-latest
+      
+    outputs:
+      lambdaArray: ${{ steps.getLambdas.outputs.lambdas }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Get functions filenames
+        id: getLambdas
+        run: |
+          lambdas=$(tree -d -L 1 -J . | jq -j -c '.[0].contents | map(.name | select(. != "ec2_files"))')
+          echo ::set-output name=lambdas::${lambdas}
+
+  update-code:
+    needs: get-filenames
+    strategy:
+      matrix:
+        lambda: ${{ fromJSON(needs.get-filenames.outputs.lambdaArray) }}
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: configure aws credentials
+      if: github.actor == 'specific-username' || startsWith(github.ref, 'refs/heads/feature/')
+        uses: aws-actions/configure-aws-credentials@v1.7.0
+        with:
+          role-to-assume: arn:aws:iam::xxyy/abc
+          role-session-name: abc
+          aws-region: us-east-1
+
+      - name: Set Environment Variable for Development Branch
+        if: startswith(github.ref == 'refs/heads/development')
+        run: echo "TABLE=dev" >> $GITHUB_ENV && echo "REGION=us-east-1" >> $GITHUB_ENV
+
+      - name: Set Environment Variable for Main Branch
+        if: github.ref == 'refs/heads/main'
+        run: echo "TABLE=prod" >> $GITHUB_ENV && echo "REGION=us-east-2" >> $GITHUB_ENV
+
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.8 # Choose the Python version you are using
+
+      - name: Create package_dir if not exists
+        run: |
+            mkdir -p package_dir
+
+      - name: Install dependencies
+        run: |
+          cd ${{matrix.lambda}} && mkdir python && pip install -r ./requirements.txt -t python
+
+      - name: add permission to file
+        run: chmod u=rwx,go=r ./*
+      - name: zip packages
+        run: |
+          if [ -n "$(find ./${{matrix.lambda}}/python -type f)" ]; then
+            cd ${{matrix.lambda}}/python && ls -la ./ && zip -r ../../${{matrix.lambda}}.zip ./
+          else
+            echo "Package directory is empty, skipping zip."
+          fi
+
+      - name: Zip Lambda functions
+        run: cd ${{matrix.lambda}} && zip ../${{matrix.lambda}}.zip ./*
+
+      - name: check zip
+        run: cd .. && ls -l
+      - name: check list
+        run: ls -l
+
+      - name: lambda deploy
+        uses: appleboy/lambda-action@v0.1.9
+        env:
+          TABLE_NAME: $TABLE
+        with:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: us-east-1
+          function_name: ${{matrix.lambda}}-${{env.TABLE}}
+          zip_file: ${{matrix.lambda}}.zip
+          memory_size: 128
+          timeout: 10
+          handler: lambda_function.lambda_handler
+          role: arn:aws:iam::xxyyy/abc
+          runtime: python3.8
